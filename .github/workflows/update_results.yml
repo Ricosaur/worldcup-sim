@@ -1,0 +1,48 @@
+name: Update WC results
+
+on:
+  schedule:
+    # Runs at 08:00, 16:00, and 23:00 UTC daily during the tournament.
+    # Matches are typically played 19:00-02:00 UTC; three daily runs catches
+    # everything within a few hours of the final whistle.
+    - cron: "0 8 * * *"
+    - cron: "0 16 * * *"
+    - cron: "0 23 * * *"
+  workflow_dispatch:  # allow manual trigger from the GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.4"
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            httr2
+            readr
+
+      - name: Fetch and append new results
+        env:
+          FOOTBALLDATA_KEY: ${{ secrets.FOOTBALLDATA_KEY }}
+        run: Rscript update_results.R
+
+      - name: Commit and push if results changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/results.csv
+          if git diff --cached --quiet; then
+            echo "No new results, nothing to commit."
+          else
+            git commit -m "chore: update WC results [skip ci]"
+            git push
+          fi
