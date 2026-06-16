@@ -20,8 +20,9 @@
 
 suppressWarnings(suppressMessages({ library(dplyr); library(readr) }))
 
-CACHE_URL_ELO    <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/elo_ratings.csv"
-CACHE_URL_GROUPS <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/groups.csv"
+CACHE_URL_ELO     <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/elo_ratings.csv"
+CACHE_URL_GROUPS  <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/groups.csv"
+CACHE_URL_RESULTS <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/results.csv"
 
 # ----- Elo ratings -----------------------------------------------------------
 # elo_ratings.csv schema: team, elo
@@ -52,13 +53,17 @@ read_groups <- function(path = "data/groups.csv", url = CACHE_URL_GROUPS) {
 # results.csv schema: date, team_a, team_b, score_a, score_b, importance
 # importance matches a key in model.R's IMPORTANCE vector.
 # Applies sequential Elo updates so the ratings reflect recent form.
-roll_elo_through_results <- function(elo, results_path = "data/results.csv") {
-  if (!file.exists(results_path)) return(elo)
-  res <- readr::read_csv(results_path, show_col_types = FALSE) %>%
-    arrange(as.Date(date))
+roll_elo_through_results <- function(elo, results_path = "data/results.csv",
+                                     url = CACHE_URL_RESULTS) {
+  res <- tryCatch(readr::read_csv(url, show_col_types = FALSE), error = \(e) NULL)
+  if (is.null(res) && file.exists(results_path)) {
+    res <- readr::read_csv(results_path, show_col_types = FALSE)
+  }
+  if (is.null(res)) return(elo)
+  res <- res %>% arrange(as.Date(date))
   for (k in seq_len(nrow(res))) {
     a <- res$team_a[k]; b <- res$team_b[k]
-    if (is.null(elo[[a]]) || is.null(elo[[b]])) next
+    if (!(a %in% names(elo)) || !(b %in% names(elo))) next
     imp <- IMPORTANCE[[res$importance[k]]]
     if (is.null(imp) || is.na(imp)) imp <- 1
     u <- elo_update(elo[[a]], elo[[b]], res$score_a[k], res$score_b[k],

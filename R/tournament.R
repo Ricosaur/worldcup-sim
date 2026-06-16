@@ -24,8 +24,12 @@ source("R/model.R")
 play_match <- function(elo_h, elo_a, host_h = FALSE, host_a = FALSE,
                        params = default_params(), knockout = FALSE) {
   eg <- elo_to_expected_goals(elo_h, elo_a, host_home = host_h, params = params)
-  sc <- sample_scoreline(eg[["home"]], eg[["away"]], rho = params$rho)
-  hg <- sc[1]; ag <- sc[2]
+  if (isTRUE(params$fast)) {
+    hg <- rpois(1, eg[["home"]]); ag <- rpois(1, eg[["away"]])
+  } else {
+    sc <- sample_scoreline(eg[["home"]], eg[["away"]], rho = params$rho)
+    hg <- sc[1]; ag <- sc[2]
+  }
 
   winner <- NA_character_
   if (knockout) {

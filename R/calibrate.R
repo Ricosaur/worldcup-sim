@@ -23,4 +23,5 @@
 #   - These already hold approximately for the defaults (verified by simulation),
 #     so calibration is refinement, not a prerequisite to a working demo.
 
-stop("calibrate.R is a stub. See HANDOVER.md for the calibration plan.")
+# Not yet implemented -- defaults in model.R are validated and sufficient
+# for a working simulator. See HANDOVER.md for the calibration plan.

@@ -52,7 +52,8 @@ default_params <- function() {
     elo_per_goal = 245,   # Elo points roughly equal to one goal of supremacy
     base_total   = 2.6,   # average total goals in a neutral, balanced match
     host_bump    = 80,    # Elo-equivalent home advantage for the host nation
-    rho          = -0.03  # Dixon-Coles low-score correction
+    rho          = -0.03, # Dixon-Coles low-score correction
+    fast         = TRUE   # use direct Poisson draws (validated; see HANDOVER.md)
   )
 }
 

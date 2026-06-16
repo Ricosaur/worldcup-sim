@@ -17,7 +17,9 @@ RESULTS_PATH <- "data/results.csv"
 NAME_MAP <- c(
   "Bosnia-Herzegovina"  = "Bosnia and Herzegovina",
   "Cape Verde Islands"  = "Cape Verde",
-  "Congo DR"            = "DR Congo"
+  "Congo DR"            = "DR Congo",
+  "CuraÃ§ao"           = "Curaçao",
+  "Curacao"             = "Curaçao"
 )
 
 normalise <- function(name) {
