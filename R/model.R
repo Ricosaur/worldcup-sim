@@ -113,3 +113,32 @@ IMPORTANCE <- c(
   continental     = 3.5,
   world_cup       = 4.0
 )
+
+# ----- Single-match probability (analytical) ---------------------------------
+
+# Given two Elo ratings, compute win/draw/loss probabilities and the full score
+# distribution using the same DC model as the simulator.
+# home_a = TRUE adds a host bump to team A (use for non-neutral venues).
+match_probabilities <- function(elo_a, elo_b, home_a = FALSE,
+                                params = default_params(), max_goals = 8) {
+  lambdas <- elo_to_expected_goals(elo_a, elo_b,
+                                   host_home = home_a, params = params)
+  lh  <- unname(lambdas["home"])
+  la  <- unname(lambdas["away"])
+  rho <- params$rho
+  gh  <- 0:max_goals
+  P   <- outer(gh, gh, function(h, a) {
+    dpois(h, lh) * dpois(a, la) *
+      mapply(dc_tau, h, a, MoreArgs = list(lambda = lh, mu = la, rho = rho))
+  })
+  P <- P / sum(P)
+  list(
+    win_a        = sum(P[row(P) > col(P)]),
+    draw         = sum(diag(P)),
+    win_b        = sum(P[row(P) < col(P)]),
+    xg_a         = lh,
+    xg_b         = la,
+    score_matrix = P,
+    goals        = gh
+  )
+}

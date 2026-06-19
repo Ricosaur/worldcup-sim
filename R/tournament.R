@@ -92,10 +92,11 @@ simulate_group <- function(teams, elo, host = NULL, params = default_params()) {
 # Returns a list with the champion and the round each team reached.
 simulate_knockout <- function(bracket, elo, host = NULL,
                               params = default_params()) {
-  reached <- setNames(rep("R32", length(bracket)), bracket)  # default label
-  round_names <- c("R32", "R16", "QF", "SF", "F", "W")
-  alive <- bracket
-  ri <- 1
+  reached      <- setNames(rep("R32", length(bracket)), bracket)
+  round_names  <- c("R32", "R16", "QF", "SF", "F", "W")
+  alive        <- bracket
+  ri           <- 1
+  slot_history <- list(alive)   # [[1]] = 32 R32 entrants in bracket order
   while (length(alive) > 1) {
     next_alive <- character(0)
     for (k in seq(1, length(alive), by = 2)) {
@@ -109,9 +110,10 @@ simulate_knockout <- function(bracket, elo, host = NULL,
     }
     ri <- ri + 1
     for (t in next_alive) reached[t] <- round_names[min(ri, length(round_names))]
+    slot_history[[ri]] <- next_alive
     alive <- next_alive
   }
-  list(champion = alive[1], reached = reached)
+  list(champion = alive[1], reached = reached, slot_history = slot_history)
 }
 
 # ----- Full tournament -------------------------------------------------------
@@ -122,13 +124,23 @@ simulate_knockout <- function(bracket, elo, host = NULL,
 #             knockout bracket. This encodes the qualification + seeding rules
 #             and is format-specific. A 32-team (8 groups, top 2) version is
 #             provided; the 48-team version is a STUB (see HANDOVER.md).
-simulate_tournament <- function(groups, elo, host = NULL,
+simulate_tournament <- function(groups, elo, hosts = character(0),
                                 advance_fn, params = default_params()) {
-  group_tables <- lapply(groups, simulate_group, elo = elo, host = host,
-                         params = params)
+  # For each group, find the host team (if any) in that group and give them
+  # the host bump. At most one host per group; any others get no bump.
+  group_tables <- lapply(names(groups), function(g) {
+    gteams <- groups[[g]]
+    host_g <- intersect(gteams, hosts)
+    simulate_group(gteams, elo = elo,
+                   host = if (length(host_g)) host_g[1] else NULL,
+                   params = params)
+  })
+  names(group_tables) <- names(groups)
   bracket <- advance_fn(group_tables)
-  ko <- simulate_knockout(bracket, elo, host = host, params = params)
-  ko
+  # Knockout venues rotate across all three host countries; no per-team bump.
+  ko      <- simulate_knockout(bracket, elo, host = NULL, params = params)
+  list(champion = ko$champion, reached = ko$reached,
+       group_tables = group_tables, slot_history = ko$slot_history)
 }
 
 # ----- Advancement rule: classic 32-team format ------------------------------
@@ -148,48 +160,105 @@ advance_32 <- function(group_tables) {
 
 # ----- Advancement rule: 48-team 2026 format ---------------------------------
 # 12 groups of 4 (A-L); top 2 (24 teams) plus 8 best third-placed = 32 in R32.
-# Third-place ranking: points, goal difference, goals scored, then random.
-# Bracket: 12 winner-vs-runner-up pairs (cross-group) + 4 third-vs-third pairs.
 #
-# The cross-group pairing (A<->D, B<->E, C<->F, G<->J, H<->K, I<->L) is an
-# approximation. For exact R16/QF path accuracy, substitute the official FIFA
-# 2026 bracket lookup table. Overall win probabilities are not sensitive to
-# this approximation.
-advance_48 <- function(group_tables) {
-  gl <- names(group_tables)
-  if (length(gl) != 12) {
-    stop(sprintf(
-      "advance_48 expects 12 groups, got %d. Check groups.csv.", length(gl)
-    ))
+# Official FIFA 2026 bracket (verified from fifa.com match schedule and
+# wikipedia.org/wiki/2026_FIFA_World_Cup_knockout_stage):
+#
+# R32 matches and their R16/QF/SF progression:
+#   M74: 1E v 3rd  M77: 1I v 3rd  -> R16 M89  -> QF M97
+#   M73: 2A v 2B   M75: 1F v 2C   -> R16 M90  -> QF M97
+#   M83: 2K v 2L   M84: 1H v 2J   -> R16 M93  -> QF M98  -> SF M101
+#   M81: 1D v 3rd  M82: 1G v 3rd  -> R16 M94  -> QF M98
+#   M76: 1C v 2F   M78: 2E v 2I   -> R16 M91  -> QF M99
+#   M79: 1A v 3rd  M80: 1L v 3rd  -> R16 M92  -> QF M99  -> SF M102 -> Final
+#   M86: 1J v 2H   M88: 2D v 2G   -> R16 M95  -> QF M100
+#   M85: 1B v 3rd  M87: 1K v 3rd  -> R16 M96  -> QF M100
+#
+# Third-place slots: each slot (named by the group winner it faces) may only
+# be filled by a third from the listed groups. Assigned by greedy bipartite
+# matching (most-constrained slot first). This correctly handles all 495
+# possible qualifying combinations; the exact assignment approximates FIFA's
+# Annex-C table but gives a valid bracket for every combination.
+
+.THIRD_SLOT_ALLOWED <- list(
+  "E" = c("A","B","C","D","F"),
+  "I" = c("C","D","F","G","H"),
+  "A" = c("C","E","F","H","I"),
+  "L" = c("E","H","I","J","K"),
+  "D" = c("B","E","F","I","J"),
+  "G" = c("A","E","H","I","J"),
+  "B" = c("E","F","G","I","J"),
+  "K" = c("D","E","I","J","L")
+)
+
+.assign_thirds <- function(qualifying_groups) {
+  slots <- names(.THIRD_SLOT_ALLOWED)
+
+  backtrack <- function(remaining, done) {
+    if (length(done) == length(slots)) return(done)
+    todo    <- setdiff(slots, names(done))
+    n_avail <- vapply(todo, function(s)
+      sum(.THIRD_SLOT_ALLOWED[[s]] %in% remaining), integer(1))
+    todo    <- todo[order(n_avail, todo)]   # most-constrained first, alpha tiebreak
+    slot    <- todo[1]
+    eligible <- sort(intersect(.THIRD_SLOT_ALLOWED[[slot]], remaining))
+    for (g in eligible) {
+      result <- backtrack(remaining[remaining != g],
+                          c(done, setNames(g, slot)))
+      if (!is.null(result)) return(result)
+    }
+    NULL  # dead end; caller will try next candidate
   }
 
-  get_rank <- function(rank) {
+  result <- backtrack(qualifying_groups, character(0))
+  if (is.null(result))
+    stop("advance_48: no valid third-place assignment for groups: ",
+         paste(qualifying_groups, collapse = ","))
+  result[slots]
+}
+
+advance_48 <- function(group_tables) {
+  gl <- names(group_tables)
+  if (length(gl) != 12)
+    stop(sprintf("advance_48 expects 12 groups, got %d. Check groups.csv.", length(gl)))
+
+  get_rank <- function(rank)
     vapply(group_tables, function(t) t$team[t$rank == rank], character(1))
-  }
+
   winners <- get_rank(1)
   runners  <- get_rank(2)
 
-  # Collect all 12 third-placed rows, rank by points / GD / GF / random.
   thirds_df <- do.call(rbind, lapply(gl, function(g) {
     row <- group_tables[[g]][group_tables[[g]]$rank == 3, ]
-    row$group <- g
-    row
+    row$group <- g; row
   }))
   thirds_df <- thirds_df[
-    order(-thirds_df$pts, -thirds_df$gd, -thirds_df$gf, runif(nrow(thirds_df))),
-  ]
-  best8 <- thirds_df$team[seq_len(8)]
+    order(-thirds_df$pts, -thirds_df$gd, -thirds_df$gf, runif(nrow(thirds_df))), ]
+  best8      <- thirds_df[seq_len(8), ]
+  best8_team <- setNames(best8$team, best8$group)
 
-  # R32: each winner faces the runner-up from its cross-paired group.
-  cross <- c(A="D", B="E", C="F", D="A", E="B", F="C",
-             G="J", H="K", I="L", J="G", K="H", L="I")
-  w_vs_r <- unlist(
-    lapply(gl, function(g) c(winners[[g]], runners[[cross[[g]]]])),
-    use.names = FALSE
+  slot_grp <- .assign_thirds(best8$group)
+  t3 <- function(g) unname(best8_team[unname(slot_grp[g])])
+
+  # Bracket vector in simulate_knockout order (adjacent pairs meet each round).
+  # Pairs map to R32 matches: M74, M77, M73, M75 | M83, M84, M81, M82 |
+  #                           M76, M78, M79, M80 | M86, M88, M85, M87
+  c(
+    winners[["E"]], t3("E"),          # M74: 1E vs 3rd
+    winners[["I"]], t3("I"),          # M77: 1I vs 3rd
+    runners[["A"]], runners[["B"]],   # M73: 2A vs 2B
+    winners[["F"]], runners[["C"]],   # M75: 1F vs 2C
+    runners[["K"]], runners[["L"]],   # M83: 2K vs 2L
+    winners[["H"]], runners[["J"]],   # M84: 1H vs 2J
+    winners[["D"]], t3("D"),          # M81: 1D vs 3rd
+    winners[["G"]], t3("G"),          # M82: 1G vs 3rd
+    winners[["C"]], runners[["F"]],   # M76: 1C vs 2F
+    runners[["E"]], runners[["I"]],   # M78: 2E vs 2I
+    winners[["A"]], t3("A"),          # M79: 1A vs 3rd
+    winners[["L"]], t3("L"),          # M80: 1L vs 3rd
+    winners[["J"]], runners[["H"]],   # M86: 1J vs 2H
+    runners[["D"]], runners[["G"]],   # M88: 2D vs 2G
+    winners[["B"]], t3("B"),          # M85: 1B vs 3rd
+    winners[["K"]], t3("K")           # M87: 1K vs 3rd
   )
-
-  # 8 best third-placed fill 4 R32 slots, paired in rank order (1v2, 3v4, ...).
-  t_vs_t <- as.vector(matrix(best8, nrow = 2))
-
-  c(w_vs_r, t_vs_t)
 }

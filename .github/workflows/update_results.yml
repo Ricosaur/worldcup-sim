@@ -35,14 +35,14 @@ jobs:
           FOOTBALLDATA_KEY: ${{ secrets.FOOTBALLDATA_KEY }}
         run: Rscript update_results.R
 
-      - name: Commit and push if results changed
+      - name: Commit and push if data changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/results.csv
+          git add data/results.csv data/elo_ratings.csv
           if git diff --cached --quiet; then
-            echo "No new results, nothing to commit."
+            echo "No new data, nothing to commit."
           else
-            git commit -m "chore: update WC results [skip ci]"
+            git commit -m "chore: update WC results and Elo ratings [skip ci]"
             git push
           fi
