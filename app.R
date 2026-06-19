@@ -204,12 +204,8 @@ server <- function(input, output, session) {
     })
 
     # Bracket slot counters: slot_mats[[round]][team, slot] = appearances
-    #                        slot_wins[[round]][team, slot] = match wins from that slot
     n_slots_r  <- c(32L, 16L, 8L, 4L, 2L, 1L)
     slot_mats  <- lapply(n_slots_r, function(ns)
-      matrix(0L, nrow = length(teams), ncol = ns, dimnames = list(teams, NULL))
-    )
-    slot_wins  <- lapply(n_slots_r[-6], function(ns)
       matrix(0L, nrow = length(teams), ncol = ns, dimnames = list(teams, NULL))
     )
 
@@ -237,14 +233,8 @@ server <- function(input, output, session) {
           sh_r <- ko$slot_history[[r]]
           for (sl in seq_along(sh_r)) {
             tm <- sh_r[sl]
-            if (tm %in% teams) {
+            if (tm %in% teams)
               slot_mats[[r]][tm, sl] <- slot_mats[[r]][tm, sl] + 1L
-              if (r < length(ko$slot_history)) {
-                next_sl <- ceiling(sl / 2)
-                if (ko$slot_history[[r + 1]][next_sl] == tm)
-                  slot_wins[[r]][tm, sl] <- slot_wins[[r]][tm, sl] + 1L
-              }
-            }
           }
         }
         if (s %% 100 == 0) setProgress(s / n)
@@ -298,20 +288,39 @@ server <- function(input, output, session) {
 
     abbrv <- function(nm) ifelse(nchar(nm) > 11, paste0(substr(nm, 1, 10), "."), nm)
 
+    # Most likely team per slot (by simulation frequency).
+    slot_bests <- lapply(1:5, function(r) {
+      mat <- slot_mats[[r]]
+      vapply(seq_len(ncol(mat)), function(ci) {
+        col <- mat[, ci]
+        if (sum(col) == 0) "?" else rownames(mat)[which.max(col)]
+      }, character(1))
+    })
+
+    # Analytical head-to-head win probability (neutral venue, 90 min).
+    h2h <- function(a, b) {
+      if (a == "?" || b == "?") return(0)
+      match_probabilities(elo[[a]], elo[[b]])$win_a
+    }
+
     bdf_rows <- list()
     for (r in 1:5) {
-      mat <- slot_mats[[r]]
-      nh  <- n_per_half[r]
+      nh <- n_per_half[r]
       for (side in c("L", "R")) {
         sl_off <- if (side == "L") 0L else nh
         x_val  <- if (side == "L") x_L[r] else x_R[r]
         for (sl in seq_len(nh)) {
-          col  <- mat[, sl + sl_off]
-          tot  <- sum(col)
-          best <- if (tot == 0) "?" else rownames(mat)[which.max(col)]
-          app  <- if (tot == 0) 0L else slot_mats[[r]][best, sl + sl_off]
-          wins <- if (tot == 0) 0L else slot_wins[[r]][best, sl + sl_off]
-          prob <- if (app == 0L) 0 else wins / app
+          col_idx <- sl + sl_off
+          best    <- slot_bests[[r]][col_idx]
+          # Opponent: within-half consecutive pairing (1<->2, 3<->4, ...),
+          # except the Final where left slot 1 faces right slot 1.
+          opp_col <- if (r < 5) {
+            (if (sl %% 2 == 1) sl + 1L else sl - 1L) + sl_off
+          } else {
+            if (side == "L") 2L else 1L
+          }
+          opp  <- slot_bests[[r]][opp_col]
+          prob <- h2h(best, opp)
           bdf_rows[[length(bdf_rows) + 1]] <- data.frame(
             half = side, round = r, slot = sl,
             x = x_val, y = half_y[[r]][sl],
@@ -323,12 +332,14 @@ server <- function(input, output, session) {
       }
     }
     {
+      # Champion: most frequent winner vs their most likely Final opponent.
       col       <- slot_mats[[6]][, 1]
       tot       <- sum(col)
       best      <- if (tot == 0) "?" else rownames(slot_mats[[6]])[which.max(col)]
-      final_app <- if (tot == 0) 0L else sum(slot_mats[[5]][best, ])
-      final_win <- if (tot == 0) 0L else sum(slot_wins[[5]][best, ])
-      prob      <- if (final_app == 0L) 0 else final_win / final_app
+      left_fin  <- slot_bests[[5]][1]
+      right_fin <- slot_bests[[5]][2]
+      prob <- if (best == left_fin) h2h(left_fin, right_fin)
+              else                  h2h(right_fin, left_fin)
       bdf_rows[[length(bdf_rows) + 1]] <- data.frame(
         half = "C", round = 6, slot = 1,
         x = x_champ, y = y_champ_pos,
@@ -455,7 +466,7 @@ server <- function(input, output, session) {
                label = c(rnd, "CHAMP", rev(rnd)),
                fontface = "bold", size = 4.2, hjust = 0.5) +
       scale_fill_gradient(low = "white", high = "#2c7bb6",
-                          limits = c(0, 1), name = "Win probability (given in slot)",
+                          limits = c(0, 1), name = "90-min win probability vs likely opponent",
                           labels = scales::percent_format(accuracy = 1)) +
       scale_x_continuous(expand = expansion(add = c(0.7, 0.7))) +
       scale_y_continuous(limits = c(0.5, 18.5),
