@@ -5,6 +5,6 @@ account: ricosaur
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 17517457
-bundleId: 12150801
+bundleId: 12177755
 url: https://ricosaur.shinyapps.io/worldcup-sim/
 version: 1

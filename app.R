@@ -38,7 +38,8 @@ ui <- page_sidebar(
   navset_card_tab(
     nav_panel(
       "Probabilities",
-      DTOutput("prob_table")
+      DTOutput("prob_table"),
+      uiOutput("team_detail_card")
     ),
     nav_panel(
       "Chart",
@@ -411,10 +412,12 @@ server <- function(input, output, session) {
       result
     })
 
-    # Analytical head-to-head win probability (neutral venue, 90 min).
+    # Advance probability = P(win 90 min) + P(draw) * 0.5 (draw -> 50/50 pens).
+    # The two sides of any paired matchup sum to exactly 100%.
     h2h <- function(a, b) {
       if (a == "?" || b == "?") return(0)
-      match_probabilities(elo[[a]], elo[[b]])$win_a
+      mp <- match_probabilities(elo[[a]], elo[[b]])
+      mp$win_a + 0.5 * mp$draw
     }
 
     bdf_rows <- list()
@@ -446,7 +449,7 @@ server <- function(input, output, session) {
       }
     }
     {
-      # Champion: whichever Final team has higher 90-min win probability vs
+      # Champion: whichever Final team has higher advance probability vs
       # the other, keeping the bracket internally consistent with the slot labels.
       left_fin  <- slot_bests[[5]][1]
       right_fin <- slot_bests[[5]][2]
@@ -506,7 +509,7 @@ server <- function(input, output, session) {
     datatable(
       d,
       rownames  = FALSE,
-      selection = "none",
+      selection = "single",
       options   = list(pageLength = 48, dom = "ft",
                        order = list(list(1, "desc")))
     ) |>
@@ -529,6 +532,52 @@ server <- function(input, output, session) {
            x = "Win probability (%)", y = NULL) +
       theme_minimal(base_size = 14) +
       theme(panel.grid.major.y = element_blank())
+  })
+
+  # ----- Team detail card ------------------------------------------------------
+
+  output$team_detail_card <- renderUI({
+    req(sim_data())
+    sel <- input$prob_table_rows_selected
+    if (length(sel) == 0) return(NULL)
+    d    <- sim_data()$summary[order(-sim_data()$summary$`Win %`), ]
+    team <- d$Team[sel]
+    grp  <- names(Filter(function(g) team %in% g, groups_data()))
+    elo_val <- round(elo_base()[[team]])
+    card(
+      style = "margin-top: 12px;",
+      card_header(sprintf("%s  —  Group %s  |  Pre-tournament Elo: %d", team, grp, elo_val)),
+      plotOutput("team_path_plot", height = "200px")
+    )
+  })
+
+  output$team_path_plot <- renderPlot({
+    req(sim_data())
+    sel <- input$prob_table_rows_selected
+    req(length(sel) > 0)
+    d    <- sim_data()$summary[order(-sim_data()$summary$`Win %`), ]
+    team <- d$Team[sel]
+    row  <- d[d$Team == team, ]
+    df <- data.frame(
+      stage = factor(
+        c("Advance from group", "Round of 16", "Quarter-final",
+          "Semi-final", "Final", "Winner"),
+        levels = c("Advance from group", "Round of 16", "Quarter-final",
+                   "Semi-final", "Final", "Winner")
+      ),
+      prob = c(row$`Group %`, row$`R16 %`, row$`QF %`,
+               row$`Semi %`, row$`Final %`, row$`Win %`)
+    )
+    ggplot(df, aes(x = prob, y = stage)) +
+      geom_col(fill = "#2c7bb6", width = 0.55) +
+      geom_text(aes(label = paste0(prob, "%")),
+                hjust = -0.15, size = 4.2) +
+      scale_x_continuous(limits = c(0, max(df$prob, 5) * 1.18),
+                         expand  = c(0, 0)) +
+      labs(x = "Probability (%)", y = NULL) +
+      theme_minimal(base_size = 13) +
+      theme(panel.grid.major.y = element_blank(),
+            panel.grid.minor   = element_blank())
   })
 
   # ----- Group breakdown -------------------------------------------------------
@@ -583,7 +632,7 @@ server <- function(input, output, session) {
                label = c(rnd, "CHAMP", rnd),
                fontface = "bold", size = 4.2, hjust = 0.5) +
       scale_fill_gradient(low = "white", high = "#2c7bb6",
-                          limits = c(0, 1), name = "90-min win probability vs likely opponent",
+                          limits = c(0, 1), name = "Advance probability vs likely opponent\n(incl. 50/50 extra time / penalties)",
                           labels = scales::percent_format(accuracy = 1)) +
       scale_x_continuous(expand = expansion(add = c(0.7, 0.7))) +
       scale_y_continuous(limits = c(0.5, 18.5),
