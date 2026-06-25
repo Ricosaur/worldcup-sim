@@ -36,18 +36,21 @@ ui <- page_sidebar(
   ),
 
   navset_card_tab(
+    id = "main_tabs",
+    nav_panel(
+      "Bracket",
+      uiOutput("bracket_ui")
+    ),
+    nav_panel(
+      "Team",
+      div(style = "max-width: 280px; margin-bottom: 14px;",
+        selectInput("selected_team", "Select team", choices = NULL)
+      ),
+      uiOutput("team_content_ui")
+    ),
     nav_panel(
       "Probabilities",
-      DTOutput("prob_table"),
-      uiOutput("team_detail_card")
-    ),
-    nav_panel(
-      "Chart",
-      plotOutput("prob_chart", height = "580px")
-    ),
-    nav_panel(
-      "Standings",
-      uiOutput("standings_ui")
+      DTOutput("prob_table")
     ),
     nav_panel(
       "Form",
@@ -58,15 +61,12 @@ ui <- page_sidebar(
       DTOutput("form_table")
     ),
     nav_panel(
-      "Group Breakdown",
-      uiOutput("group_breakdown_ui")
+      "Standings",
+      uiOutput("standings_ui")
     ),
     nav_panel(
-      "Bracket",
-      div(style = "overflow-x: auto; -webkit-overflow-scrolling: touch;",
-        plotOutput("bracket_plot",
-                   height = "calc(100vh - 120px)", width = "100%")
-      )
+      "Group Breakdown",
+      uiOutput("group_breakdown_ui")
     ),
     nav_panel(
       "Head-to-Head",
@@ -106,6 +106,18 @@ ui <- page_sidebar(
 
 server <- function(input, output, session) {
 
+  sim_has_run <- reactiveVal(FALSE)
+
+  sim_notice <- function() {
+    div(style = "padding: 60px; text-align: center; color: #6c757d;",
+      p(style = "font-size: 1.1em; margin-bottom: 6px;",
+        "Run the simulation to see results."),
+      p(class = "small",
+        "Set the number of simulations in the panel on the left, then click ",
+        strong("Run simulation"), ".")
+    )
+  }
+
   elo_base <- reactive({
     read_elo()
   })
@@ -116,6 +128,15 @@ server <- function(input, output, session) {
     teams <- sort(names(elo_base()))
     updateSelectInput(session, "h2h_a", choices = teams, selected = teams[1])
     updateSelectInput(session, "h2h_b", choices = teams, selected = teams[2])
+  })
+
+  # After sim runs, default H2H to the two most likely finalists.
+  observeEvent(sim_data(), {
+    finalists <- sim_data()$slot_bests[[5]]
+    if (length(finalists) == 2 && !any(finalists == "?")) {
+      updateSelectInput(session, "h2h_a", selected = finalists[1])
+      updateSelectInput(session, "h2h_b", selected = finalists[2])
+    }
   })
 
   # ----- Last updated ----------------------------------------------------------
@@ -281,6 +302,7 @@ server <- function(input, output, session) {
   })
 
   sim_data <- eventReactive(input$run, {
+    sim_has_run(TRUE)
     elo    <- elo_base()
     groups <- groups_data()
 
@@ -501,11 +523,14 @@ server <- function(input, output, session) {
     list(summary    = summary[order(-summary$`Win %`), ],
          group_df   = group_df,
          bracket_df = bracket_df,
-         segs_df    = segs_df)
+         segs_df    = segs_df,
+         slot_mats  = slot_mats,
+         slot_bests = slot_bests)
   })
 
   output$prob_table <- renderDT({
     d <- sim_data()$summary
+    d <- d[d$`Group %` > 0, ]
     datatable(
       d,
       rownames  = FALSE,
@@ -520,44 +545,50 @@ server <- function(input, output, session) {
                   backgroundPosition = "left")
   })
 
-  output$prob_chart <- renderPlot({
-    df      <- head(sim_data()$summary, 16)
-    df$Team <- factor(df$Team, levels = rev(df$Team))
-    ggplot(df, aes(x = `Win %`, y = Team)) +
-      geom_col(fill = "#2c7bb6", width = 0.7) +
-      geom_text(aes(label = paste0(`Win %`, "%")),
-                hjust = -0.15, size = 3.8) +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
-      labs(title = "Win probability -- top 16 teams",
-           x = "Win probability (%)", y = NULL) +
-      theme_minimal(base_size = 14) +
-      theme(panel.grid.major.y = element_blank())
-  })
 
-  # ----- Team detail card ------------------------------------------------------
+  # ----- Team tab --------------------------------------------------------------
 
-  output$team_detail_card <- renderUI({
-    req(sim_data())
-    sel <- input$prob_table_rows_selected
-    if (length(sel) == 0) return(NULL)
-    d    <- sim_data()$summary[order(-sim_data()$summary$`Win %`), ]
-    team <- d$Team[sel]
-    grp  <- names(Filter(function(g) team %in% g, groups_data()))
-    elo_val <- round(elo_base()[[team]])
-    card(
-      style = "margin-top: 12px;",
-      card_header(sprintf("%s  —  Group %s  |  Pre-tournament Elo: %d", team, grp, elo_val)),
-      plotOutput("team_path_plot", height = "200px")
+  output$team_content_ui <- renderUI({
+    if (!sim_has_run()) return(sim_notice())
+    layout_columns(
+      col_widths = c(6, 6),
+      card(
+        card_header("Stage probabilities"),
+        plotOutput("team_path_plot", height = "260px")
+      ),
+      card(
+        card_header("Probable bracket path"),
+        div(class = "text-muted small", style = "margin-bottom: 6px;",
+          "Most likely opponent at each stage, based on simulation results.",
+          "Advance % includes extra time / penalties (50/50 on draws)."),
+        tableOutput("team_path_table")
+      )
     )
   })
 
+  # Populate selector from groups (available before sim runs).
+  observe({
+    teams <- sort(unlist(groups_data(), use.names = FALSE))
+    updateSelectInput(session, "selected_team", choices = teams)
+  })
+
+  # Clicking a row in Probabilities navigates to Team tab with that team.
+  observeEvent(input$prob_table_rows_selected, {
+    req(length(input$prob_table_rows_selected) > 0)
+    d    <- sim_data()$summary
+    d    <- d[d$`Group %` > 0, ]
+    team <- d$Team[input$prob_table_rows_selected]
+    updateSelectInput(session, "selected_team", selected = team)
+    nav_select("main_tabs", "Team")
+  })
+
+  # Stage probability bar chart.
   output$team_path_plot <- renderPlot({
-    req(sim_data())
-    sel <- input$prob_table_rows_selected
-    req(length(sel) > 0)
-    d    <- sim_data()$summary[order(-sim_data()$summary$`Win %`), ]
-    team <- d$Team[sel]
-    row  <- d[d$Team == team, ]
+    if (!sim_has_run()) return(NULL)
+    req(sim_data(), nzchar(input$selected_team))
+    team <- input$selected_team
+    row  <- sim_data()$summary[sim_data()$summary$Team == team, ]
+    req(nrow(row) > 0)
     df <- data.frame(
       stage = factor(
         c("Advance from group", "Round of 16", "Quarter-final",
@@ -580,10 +611,44 @@ server <- function(input, output, session) {
             panel.grid.minor   = element_blank())
   })
 
+  # Probable bracket path table.
+  output$team_path_table <- renderTable({
+    req(sim_data(), nzchar(input$selected_team))
+    team    <- input$selected_team
+    sm      <- sim_data()$slot_mats
+    sb      <- sim_data()$slot_bests
+    elo_v   <- elo_base()
+    nph     <- c(16L, 8L, 4L, 2L, 1L)
+    labels  <- c("Round of 32", "Round of 16", "Quarter-final", "Semi-final", "Final")
+
+    rows <- lapply(1:5, function(r) {
+      if (!team %in% rownames(sm[[r]])) return(NULL)
+      counts <- sm[[r]][team, ]
+      if (sum(counts) == 0) return(NULL)
+      best  <- which.max(counts)
+      side  <- if (best <= nph[r]) "L" else "R"
+      sl    <- if (side == "L") best else best - nph[r]
+      sl_off <- if (side == "L") 0L else nph[r]
+      opp_col <- if (r < 5) (if (sl %% 2 == 1) sl + 1L else sl - 1L) + sl_off
+                 else       if (side == "L") 2L else 1L
+      opp <- sb[[r]][opp_col]
+      if (!is.na(opp) && opp != "?" && opp %in% names(elo_v)) {
+        mp  <- match_probabilities(elo_v[[team]], elo_v[[opp]])
+        adv <- paste0(round(100 * (mp$win_a + 0.5 * mp$draw)), "%")
+      } else {
+        opp <- "TBD"; adv <- "—"
+      }
+      data.frame(Round = labels[r], `Likely opponent` = opp,
+                 `Advance %` = adv,
+                 check.names = FALSE, stringsAsFactors = FALSE)
+    })
+    do.call(rbind, Filter(Negate(is.null), rows))
+  }, striped = TRUE, hover = TRUE, align = "llr", rownames = FALSE)
+
   # ----- Group breakdown -------------------------------------------------------
 
   output$group_breakdown_ui <- renderUI({
-    req(sim_data())
+    if (!sim_has_run()) return(sim_notice())
     groups <- groups_data()
     cards <- lapply(sort(names(groups)), function(g) {
       card(card_header(paste("Group", g)),
@@ -604,6 +669,12 @@ server <- function(input, output, session) {
   }
 
   # ----- Bracket visualisation -------------------------------------------------
+
+  output$bracket_ui <- renderUI({
+    if (!sim_has_run()) return(sim_notice())
+    div(style = "overflow-x: auto; -webkit-overflow-scrolling: touch;",
+        plotOutput("bracket_plot", height = "calc(100vh - 120px)", width = "100%"))
+  })
 
   output$bracket_plot <- renderPlot({
     req(sim_data())
