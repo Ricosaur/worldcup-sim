@@ -20,3 +20,4 @@ R/calibrate.R
 # Intermediate data files
 eloratings_live.csv
 elo_ratings_wc2026.csv
+/rsconnect
