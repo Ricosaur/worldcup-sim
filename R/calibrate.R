@@ -1,27 +1,100 @@
-# calibrate.R  (STUB — see HANDOVER.md)
+# calibrate.R
 #
-# The default scoring parameters in model.R (elo_per_goal, base_total, rho) are
-# reasonable starting values, but for trustworthy ABSOLUTE probabilities they
-# should be calibrated against historical international results.
+# Calibrate elo_per_goal, base_total, and rho against World Cup match data.
 #
-# Goal: choose params so the model's predicted match outcomes match observed
-# frequencies over a large set of past internationals.
+# Strategy: train on 2014 Brazil WC + 2018 Russia WC (128 matches total),
+# validate on 2022 Qatar WC (64 matches). True temporal split, same competition
+# type, no data leakage.
 #
-# Suggested approach (to implement in Claude Code):
-#   1. Get a historical international results dataset with each team's Elo at
-#      the time of the match (eloratings.net provides both).
-#   2. For a grid of (elo_per_goal, base_total, rho), compute the model's
-#      predicted P(home win)/P(draw)/P(away win) and expected goals per match.
-#   3. Score each parameter set by log-loss against actual results (and compare
-#      predicted vs actual goal distributions).
-#   4. Pick the params minimising log-loss. Optionally fit base_total as a mild
-#      function of total Elo (stronger teams' matches differ slightly).
+# After running:
+#   1. Paste calibrated params into default_params() in R/model.R if validated.
+#   2. Run source("validate.R"); validate_2022() for full Spearman/Brier picture.
 #
-# Validation targets from football reality (rough):
-#   - A ~300 Elo favourite wins ~60-70% of matches, draws ~20%.
-#   - Average total goals per international is ~2.5-2.8.
-#   - These already hold approximately for the defaults (verified by simulation),
-#     so calibration is refinement, not a prerequisite to a working demo.
+# Usage:
+#   source("R/calibrate.R")
+#   calibrate_wc()
 
-# Not yet implemented -- defaults in model.R are validated and sufficient
-# for a working simulator. See HANDOVER.md for the calibration plan.
+source("R/model.R")
+source("validate.R")   # provides fetch_all_wc, GROUPS_2014/2018, CODES_*, etc.
+suppressWarnings(suppressMessages({ library(dplyr); library(readr) }))
+
+build_training_set <- function() {
+  d14 <- fetch_all_wc(TEAMS_2014, 2014, CODES_2014, URL_OVERRIDES_2014)
+  d18 <- fetch_all_wc(TEAMS_2018, 2018, CODES_2018, URL_OVERRIDES_2018)
+  bind_rows(
+    bind_rows(Filter(Negate(is.null), d14)),
+    bind_rows(Filter(Negate(is.null), d18))
+  ) %>%
+    mutate(key = paste(date, pmin(team_a, team_b), pmax(team_a, team_b), sep = "|")) %>%
+    distinct(key, .keep_all = TRUE)
+}
+
+objective <- function(par, matches) {
+  params <- list(elo_per_goal = par[1], base_total = par[2],
+                 host_bump = 80, rho = par[3], fast = FALSE)
+  scores <- vapply(seq_len(nrow(matches)), function(i) {
+    r  <- matches[i, ]
+    eg <- elo_to_expected_goals(r$elo_a, r$elo_b, params = params)
+    g  <- 0:8
+    P  <- outer(g, g, function(h, a)
+      dpois(h, eg[["home"]]) * dpois(a, eg[["away"]]) *
+        mapply(dc_tau, h, a,
+               MoreArgs = list(lambda = eg[["home"]], mu = eg[["away"]],
+                               rho = params$rho)))
+    P <- P / sum(P)
+    p_act <- if (r$score_a > r$score_b) sum(P[row(P) > col(P)])
+             else if (r$score_a == r$score_b) sum(P[row(P) == col(P)])
+             else sum(P[row(P) < col(P)])
+    -log(max(p_act, 1e-10))
+  }, numeric(1))
+  mean(scores)
+}
+
+calibrate_wc <- function() {
+  cat("Building training set (2014 + 2018 WC)...\n")
+  matches <- build_training_set()
+  cat(sprintf("Training on %d unique matches.\n\n", nrow(matches)))
+
+  grid <- expand.grid(
+    elo_per_goal = seq(180, 320, by = 20),
+    base_total   = seq(2.2, 3.2, by = 0.2),
+    rho          = seq(-0.10, 0.00, by = 0.02),
+    stringsAsFactors = FALSE
+  )
+  cat(sprintf("Grid search: %d combinations...\n", nrow(grid)))
+  grid$loss <- vapply(seq_len(nrow(grid)), function(i) {
+    if (i %% 50 == 0) cat(sprintf("  %d / %d\r", i, nrow(grid)))
+    objective(c(grid$elo_per_goal[i], grid$base_total[i], grid$rho[i]), matches)
+  }, numeric(1))
+  best_g <- grid[which.min(grid$loss), ]
+  cat(sprintf("\nBest grid: elo_per_goal=%.0f, base_total=%.1f, rho=%.2f  (loss=%.4f)\n",
+              best_g$elo_per_goal, best_g$base_total, best_g$rho, best_g$loss))
+
+  cat("Refining with Nelder-Mead...\n")
+  opt <- optim(c(best_g$elo_per_goal, best_g$base_total, best_g$rho),
+               objective, matches = matches, method = "Nelder-Mead",
+               control = list(maxit = 1000, reltol = 1e-6))
+
+  cat(sprintf(paste0(
+    "\n=== Calibrated params (paste into default_params() in R/model.R) ===\n",
+    "  elo_per_goal = %.1f   (current default: 245)\n",
+    "  base_total   = %.3f  (current default: 2.6)\n",
+    "  rho          = %.4f  (current default: -0.03)\n",
+    "  host_bump    = 80     (not calibrated -- leave unchanged)\n",
+    "  Training log-loss: %.4f\n"
+  ), opt$par[1], opt$par[2], opt$par[3], opt$value))
+
+  cat("\nValidating on 2022 WC...\n")
+  d22   <- fetch_all_2022()
+  m22   <- bind_rows(Filter(Negate(is.null), d22)) %>%
+    mutate(key = paste(date, pmin(team_a, team_b), pmax(team_a, team_b), sep = "|")) %>%
+    distinct(key, .keep_all = TRUE)
+  loss_default <- objective(c(245, 2.6, -0.03), m22)
+  loss_cal     <- objective(opt$par, m22)
+  cat(sprintf("  Log-loss (default params): %.4f\n", loss_default))
+  cat(sprintf("  Log-loss (calibrated):     %.4f\n", loss_cal))
+  cat(if (loss_cal < loss_default) "  -> IMPROVED: update default_params()\n"
+      else "  -> No improvement on 2022 -- keep defaults\n")
+
+  invisible(opt$par)
+}

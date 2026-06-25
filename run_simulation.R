@@ -10,12 +10,10 @@ source("R/tournament.R")
 source("R/fetch_data.R")
 
 N_SIMS <- 5000   # raise to 5000+ for final runs
-HOST   <- NULL   # 2026 has 3 hosts (USA, Canada, Mexico); multi-host not yet
-                 # implemented -- see HANDOVER.md item 4
 
-elo    <- read_elo()
-groups <- read_groups()
-# Optional: elo <- roll_elo_through_results(elo)   # if data/results.csv exists
+elo     <- read_elo()
+groups  <- read_groups()
+results <- read_results()
 
 teams <- unlist(groups, use.names = FALSE)
 champ_count  <- setNames(integer(length(teams)), teams)
@@ -26,7 +24,9 @@ reached_rank <- c(R32 = 1, R16 = 2, QF = 3, SF = 4, F = 5, W = 6)
 
 cat(sprintf("Running %d tournament simulations...\n", N_SIMS))
 for (s in seq_len(N_SIMS)) {
-  ko <- simulate_tournament(groups, elo, host = HOST, advance_fn = advance_48)
+  ko <- simulate_tournament(groups, elo, advance_fn = advance_48,
+                             hosts      = c("United States", "Canada", "Mexico"),
+                             results_df = results)
   champ_count[ko$champion] <- champ_count[ko$champion] + 1
   r <- ko$reached
   for (t in names(r)) {

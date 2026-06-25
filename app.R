@@ -21,6 +21,7 @@ ui <- page_sidebar(
 
   sidebar = sidebar(
     width = 260,
+    open = list(desktop = "open", mobile = "closed"),
     sliderInput("n_sims", "Simulations",
                 min = 500, max = 10000, value = 2000, step = 500),
     actionButton("run", "Run simulation",
@@ -48,12 +49,23 @@ ui <- page_sidebar(
       uiOutput("standings_ui")
     ),
     nav_panel(
+      "Form",
+      div(class = "text-muted small", style = "margin-bottom: 8px;",
+        "Expected points = 3 × P(win) + P(draw) based on current Elo. ",
+        "Positive = outperforming; negative = underperforming. ",
+        "Dead-rubber matches (already-qualified teams rotating squads) can inflate scores."),
+      DTOutput("form_table")
+    ),
+    nav_panel(
       "Group Breakdown",
       uiOutput("group_breakdown_ui")
     ),
     nav_panel(
       "Bracket",
-      plotOutput("bracket_plot", height = "1100px")
+      div(style = "overflow-x: auto; -webkit-overflow-scrolling: touch;",
+        plotOutput("bracket_plot",
+                   height = "calc(100vh - 120px)", width = "100%")
+      )
     ),
     nav_panel(
       "Head-to-Head",
@@ -185,6 +197,88 @@ server <- function(input, output, session) {
     })
   }
 
+  # ----- Form (overperformance index) -----------------------------------------
+
+  form_data <- reactive({
+    res    <- results_data()
+    elo    <- elo_base()
+    groups <- groups_data()
+    if (is.null(res) || nrow(res) == 0) return(NULL)
+
+    team_group <- setNames(rep(names(groups), lengths(groups)),
+                           unlist(groups, use.names = FALSE))
+    teams <- names(team_group)
+
+    exp_pts  <- setNames(numeric(length(teams)), teams)
+    act_pts  <- setNames(numeric(length(teams)), teams)
+    n_played <- setNames(integer(length(teams)), teams)
+
+    for (i in seq_len(nrow(res))) {
+      r <- res[i, ]
+      a <- r$team_a; b <- r$team_b
+      if (!(a %in% teams) || !(b %in% teams)) next
+      if (is.na(r$score_a) || is.na(r$score_b)) next
+      pr   <- match_probabilities(elo[[a]], elo[[b]])
+      pa   <- if (r$score_a > r$score_b) 3L else if (r$score_a == r$score_b) 1L else 0L
+      pb   <- if (r$score_b > r$score_a) 3L else if (r$score_b == r$score_a) 1L else 0L
+      exp_pts[a]  <- exp_pts[a]  + 3 * pr$win_a + pr$draw
+      exp_pts[b]  <- exp_pts[b]  + 3 * pr$win_b + pr$draw
+      act_pts[a]  <- act_pts[a]  + pa
+      act_pts[b]  <- act_pts[b]  + pb
+      n_played[a] <- n_played[a] + 1L
+      n_played[b] <- n_played[b] + 1L
+    }
+
+    overperf  <- act_pts - exp_pts
+    per_match <- ifelse(n_played > 0, overperf / n_played, 0)
+
+    adj       <- adjusted_elo(elo, res)
+    delta_elo <- round(adj[teams] - elo[teams])
+
+    df <- data.frame(
+      Team        = teams,
+      Group       = team_group[teams],
+      `Raw Elo`   = round(elo[teams]),
+      `Adj. Elo`  = round(adj[teams]),
+      `Δ Elo`     = delta_elo,
+      Played      = n_played[teams],
+      `Exp Pts`   = round(exp_pts[teams], 1),
+      `Act Pts`   = act_pts[teams],
+      `+/-`       = round(overperf[teams], 1),
+      `Per Match` = round(per_match[teams], 2),
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+    df[order(-df$`+/-`), ]
+  })
+
+  output$form_table <- renderDT({
+    df <- form_data()
+    if (is.null(df)) return(datatable(data.frame(Message = "No results recorded yet."),
+                                      rownames = FALSE))
+    max_abs <- max(abs(df$`+/-`), 0.1)
+    datatable(
+      df,
+      rownames  = FALSE,
+      selection = "none",
+      options   = list(pageLength = 48, dom = "ft")
+    ) |>
+      formatStyle("+/-",
+        backgroundColor = styleInterval(
+          c(-1.5, -0.5, 0.5, 1.5),
+          c("#f5c6cb", "#fde8cc", "#fff9c4", "#d4edda", "#b8ddb8")
+        ),
+        fontWeight = "bold"
+      ) |>
+      formatStyle("Per Match",
+        color = styleInterval(0, c("#c0392b", "#27ae60")),
+        fontWeight = "bold"
+      ) |>
+      formatStyle("Δ Elo",
+        color = styleInterval(0, c("#c0392b", "#27ae60")),
+        fontWeight = "bold"
+      )
+  })
+
   sim_data <- eventReactive(input$run, {
     elo    <- elo_base()
     groups <- groups_data()
@@ -212,7 +306,8 @@ server <- function(input, output, session) {
     withProgress(message = "Simulating...", value = 0, {
       for (s in seq_len(n)) {
         ko <- simulate_tournament(groups, elo, advance_fn = advance_48,
-                                   hosts = c("United States", "Canada", "Mexico"))
+                                   hosts      = c("United States", "Canada", "Mexico"),
+                                   results_df = results_data())
         champ_n[ko$champion] <- champ_n[ko$champion] + 1
         for (t in names(ko$reached)) {
           rv <- REACHED_RANK[ko$reached[t]]
@@ -288,13 +383,32 @@ server <- function(input, output, session) {
 
     abbrv <- function(nm) ifelse(nchar(nm) > 11, paste0(substr(nm, 1, 10), "."), nm)
 
-    # Most likely team per slot (by simulation frequency).
+    # Most likely team per slot (by simulation frequency), deduplicated so
+    # each team appears at most once per round. Greedy by descending count.
     slot_bests <- lapply(1:5, function(r) {
-      mat <- slot_mats[[r]]
-      vapply(seq_len(ncol(mat)), function(ci) {
+      mat     <- slot_mats[[r]]
+      n_slots <- ncol(mat)
+      result  <- rep("?", n_slots)
+      entries <- do.call(rbind, lapply(seq_len(n_slots), function(ci) {
         col <- mat[, ci]
-        if (sum(col) == 0) "?" else rownames(mat)[which.max(col)]
-      }, character(1))
+        if (sum(col) == 0) return(NULL)
+        ord <- order(-col)
+        data.frame(slot  = ci,
+                   team  = rownames(mat)[ord],
+                   count = col[ord],
+                   stringsAsFactors = FALSE)
+      }))
+      if (is.null(entries) || nrow(entries) == 0) return(result)
+      entries <- entries[order(-entries$count), ]
+      placed  <- character(0)
+      for (i in seq_len(nrow(entries))) {
+        sl <- entries$slot[i]; tm <- entries$team[i]
+        if (result[sl] == "?" && !tm %in% placed) {
+          result[sl] <- tm
+          placed <- c(placed, tm)
+        }
+      }
+      result
     })
 
     # Analytical head-to-head win probability (neutral venue, 90 min).
@@ -332,14 +446,17 @@ server <- function(input, output, session) {
       }
     }
     {
-      # Champion: most frequent winner vs their most likely Final opponent.
-      col       <- slot_mats[[6]][, 1]
-      tot       <- sum(col)
-      best      <- if (tot == 0) "?" else rownames(slot_mats[[6]])[which.max(col)]
+      # Champion: whichever Final team has higher 90-min win probability vs
+      # the other, keeping the bracket internally consistent with the slot labels.
       left_fin  <- slot_bests[[5]][1]
       right_fin <- slot_bests[[5]][2]
-      prob <- if (best == left_fin) h2h(left_fin, right_fin)
-              else                  h2h(right_fin, left_fin)
+      p_left    <- h2h(left_fin, right_fin)
+      p_right   <- h2h(right_fin, left_fin)
+      best      <- if (left_fin == "?" && right_fin == "?") "?"
+                   else if (left_fin  == "?") right_fin
+                   else if (right_fin == "?") left_fin
+                   else if (p_left >= p_right) left_fin else right_fin
+      prob      <- if (best == left_fin) p_left else p_right
       bdf_rows[[length(bdf_rows) + 1]] <- data.frame(
         half = "C", round = 6, slot = 1,
         x = x_champ, y = y_champ_pos,
@@ -463,7 +580,7 @@ server <- function(input, output, session) {
       annotate("text",
                x = c(x_L, 7.0, x_R),
                y = 17.3,
-               label = c(rnd, "CHAMP", rev(rnd)),
+               label = c(rnd, "CHAMP", rnd),
                fontface = "bold", size = 4.2, hjust = 0.5) +
       scale_fill_gradient(low = "white", high = "#2c7bb6",
                           limits = c(0, 1), name = "90-min win probability vs likely opponent",

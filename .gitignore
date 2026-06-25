@@ -6,12 +6,16 @@
 
 # Internal development docs
 HANDOVER.md
+TASK_HANDOVER.md
 
 # Scratch / test scripts
 test_api.R
 test_footballdata.R
 compare_elo.R
 fetch_groups.R
+validate.R
+validate_2026.R
+R/calibrate.R
 
 # Intermediate data files
 eloratings_live.csv

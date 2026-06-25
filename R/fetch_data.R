@@ -49,6 +49,16 @@ read_groups <- function(path = "data/groups.csv", url = CACHE_URL_GROUPS) {
   split(as.character(df$team), as.character(df$group))
 }
 
+# ----- WC match results -------------------------------------------------------
+# results.csv schema: date, team_a, team_b, score_a, score_b, importance
+read_results <- function(path = "data/results.csv", url = CACHE_URL_RESULTS) {
+  res <- tryCatch(readr::read_csv(url, show_col_types = FALSE), error = \(e) NULL)
+  if (is.null(res) && file.exists(path))
+    res <- readr::read_csv(path, show_col_types = FALSE)
+  if (is.null(res)) return(NULL)
+  res %>% arrange(as.Date(date))
+}
+
 # ----- Rolling Elo forward through results (optional) ------------------------
 # results.csv schema: date, team_a, team_b, score_a, score_b, importance
 # importance matches a key in model.R's IMPORTANCE vector.

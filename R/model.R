@@ -114,6 +114,63 @@ IMPORTANCE <- c(
   world_cup       = 4.0
 )
 
+# ----- Bayesian in-tournament Elo adjustment ---------------------------------
+
+# Nudges each team's Elo based on how they are over/underperforming their
+# pre-tournament rating during the current tournament. Uses shrinkage so the
+# adjustment is negligible after 1 match and grows as evidence accumulates.
+#
+#   adj = elo + (overperf_per_match * elo_per_overperf) * n/(n+k)
+#
+# k = 10: after 3 group games the weight is ~23%; after a full 7-match run ~41%.
+# elo_per_overperf = 60: 1 unexpected point per match ≈ 60 Elo.
+adjusted_elo <- function(elo, results_df, params = default_params(),
+                         k = 10, elo_per_overperf = 60) {
+  if (is.null(results_df) || nrow(results_df) == 0) return(elo)
+  teams    <- names(elo)
+  exp_pts  <- setNames(numeric(length(teams)), teams)
+  act_pts  <- setNames(numeric(length(teams)), teams)
+  n_played <- setNames(integer(length(teams)), teams)
+
+  for (i in seq_len(nrow(results_df))) {
+    r  <- results_df[i, ]
+    ta <- as.character(r$team_a); tb <- as.character(r$team_b)
+    if (!ta %in% teams || !tb %in% teams) next
+    if (is.na(r$score_a) || is.na(r$score_b)) next
+
+    eg <- elo_to_expected_goals(elo[[ta]], elo[[tb]], params = params)
+    g  <- 0:8
+    P  <- outer(g, g, function(h, a)
+      dpois(h, eg[["home"]]) * dpois(a, eg[["away"]]) *
+        mapply(dc_tau, h, a,
+               MoreArgs = list(lambda = eg[["home"]], mu = eg[["away"]],
+                               rho = params$rho)))
+    P <- P / sum(P)
+    p_win  <- sum(P[row(P) > col(P)])
+    p_draw <- sum(P[row(P) == col(P)])
+    p_loss <- sum(P[row(P) < col(P)])
+
+    pts_a <- if (r$score_a > r$score_b) 3L else if (r$score_a == r$score_b) 1L else 0L
+    pts_b <- if (r$score_b > r$score_a) 3L else if (r$score_b == r$score_a) 1L else 0L
+
+    exp_pts[ta]  <- exp_pts[ta]  + 3 * p_win  + p_draw
+    exp_pts[tb]  <- exp_pts[tb]  + 3 * p_loss + p_draw
+    act_pts[ta]  <- act_pts[ta]  + pts_a
+    act_pts[tb]  <- act_pts[tb]  + pts_b
+    n_played[ta] <- n_played[ta] + 1L
+    n_played[tb] <- n_played[tb] + 1L
+  }
+
+  adj <- elo
+  for (team in teams) {
+    n <- n_played[team]
+    if (n == 0L) next
+    overperf_per_match <- (act_pts[team] - exp_pts[team]) / n
+    adj[team] <- elo[team] + overperf_per_match * elo_per_overperf * (n / (n + k))
+  }
+  adj
+}
+
 # ----- Single-match probability (analytical) ---------------------------------
 
 # Given two Elo ratings, compute win/draw/loss probabilities and the full score

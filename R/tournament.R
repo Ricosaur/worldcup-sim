@@ -51,36 +51,86 @@ play_match <- function(elo_h, elo_a, host_h = FALSE, host_a = FALSE,
 
 # ----- Group stage -----------------------------------------------------------
 
+# 2026 WC tiebreaker order (after overall points):
+#   1. H2H points among tied teams
+#   2. H2H goal difference among tied teams
+#   3. H2H goals for among tied teams
+#   4. Overall goal difference
+#   5. Overall goals for
+#   6. Random (approximates drawing of lots / fair play)
+.rank_group <- function(idx, tab, h2h_pts, h2h_gf, h2h_ga) {
+  idx <- idx[order(-tab$pts[idx])]
+  n   <- length(idx)
+  result <- integer(0)
+  i <- 1
+  while (i <= n) {
+    j <- i
+    while (j < n && tab$pts[idx[j + 1]] == tab$pts[idx[i]]) j <- j + 1
+    if (j == i) {
+      result <- c(result, idx[i])
+    } else {
+      tied    <- idx[i:j]
+      m       <- length(tied)
+      h2h_p   <- rowSums(h2h_pts[tied, tied, drop = FALSE])
+      h2h_gd  <- rowSums(h2h_gf[tied, tied, drop = FALSE]) -
+                 rowSums(h2h_ga[tied, tied, drop = FALSE])
+      h2h_gfs <- rowSums(h2h_gf[tied, tied, drop = FALSE])
+      sub_ord <- order(-h2h_p, -h2h_gd, -h2h_gfs,
+                       -tab$gd[tied], -tab$gf[tied], runif(m))
+      result  <- c(result, tied[sub_ord])
+    }
+    i <- j + 1
+  }
+  result
+}
+
 # Play all matches in one group (round robin) and return the standings.
 # teams: character vector of team names in this group.
 # elo:   named numeric vector of Elo ratings.
 # host:  the host nation name (gets the host bump when playing at "home";
 #        at a World Cup all venues are neutral except for the host).
-simulate_group <- function(teams, elo, host = NULL, params = default_params()) {
-  n <- length(teams)
+simulate_group <- function(teams, elo, host = NULL, known_results = NULL,
+                           params = default_params()) {
+  n   <- length(teams)
   tab <- data.frame(team = teams, pts = 0L, gf = 0L, ga = 0L,
                     stringsAsFactors = FALSE)
-  add <- function(tab, t, pts, gf, ga) {
-    r <- match(t, tab$team)
-    tab$pts[r] <- tab$pts[r] + pts; tab$gf[r] <- tab$gf[r] + gf
-    tab$ga[r] <- tab$ga[r] + ga; tab
-  }
+  h2h_pts <- matrix(0L, n, n)
+  h2h_gf  <- matrix(0L, n, n)
+  h2h_ga  <- matrix(0L, n, n)
+
   for (i in 1:(n - 1)) for (j in (i + 1):n) {
     a <- teams[i]; b <- teams[j]
-    hh <- !is.null(host) && a == host
-    ah <- !is.null(host) && b == host
-    m <- play_match(elo[[a]], elo[[b]], host_h = hh, host_a = ah, params = params)
-    pa <- if (m$hg > m$ag) 3 else if (m$hg == m$ag) 1 else 0
-    pb <- if (m$ag > m$hg) 3 else if (m$ag == m$hg) 1 else 0
-    tab <- add(tab, a, pa, m$hg, m$ag)
-    tab <- add(tab, b, pb, m$ag, m$hg)
+
+    # Use actual result if available, otherwise simulate
+    played <- if (!is.null(known_results) && nrow(known_results) > 0)
+      known_results[
+        (known_results$team_a == a & known_results$team_b == b) |
+        (known_results$team_a == b & known_results$team_b == a), ]
+    else NULL
+
+    if (!is.null(played) && nrow(played) > 0) {
+      r  <- played[1, ]
+      hg <- if (r$team_a == a) r$score_a else r$score_b
+      ag <- if (r$team_a == a) r$score_b else r$score_a
+    } else {
+      hh <- !is.null(host) && a == host
+      ah <- !is.null(host) && b == host
+      m  <- play_match(elo[[a]], elo[[b]], host_h = hh, host_a = ah, params = params)
+      hg <- m$hg; ag <- m$ag
+    }
+
+    pa <- if (hg > ag) 3L else if (hg == ag) 1L else 0L
+    pb <- if (ag > hg) 3L else if (ag == hg) 1L else 0L
+    tab$pts[i] <- tab$pts[i] + pa; tab$gf[i] <- tab$gf[i] + hg; tab$ga[i] <- tab$ga[i] + ag
+    tab$pts[j] <- tab$pts[j] + pb; tab$gf[j] <- tab$gf[j] + ag; tab$ga[j] <- tab$ga[j] + hg
+    h2h_pts[i, j] <- pa; h2h_pts[j, i] <- pb
+    h2h_gf[i, j]  <- hg; h2h_gf[j, i] <- ag
+    h2h_ga[i, j]  <- ag; h2h_ga[j, i] <- hg
   }
-  tab$gd <- tab$gf - tab$ga
-  # Tiebreakers: points, goal difference, goals scored, then random (a true WC
-  # uses head-to-head and fair-play first; random is a reasonable approximation
-  # and avoids alphabetical bias. Refine if needed — see HANDOVER.md).
-  tab <- tab[order(-tab$pts, -tab$gd, -tab$gf, runif(nrow(tab))), ]
-  tab$rank <- seq_len(nrow(tab))
+  tab$gd      <- tab$gf - tab$ga
+  final_order <- .rank_group(seq_len(n), tab, h2h_pts, h2h_gf, h2h_ga)
+  tab         <- tab[final_order, ]
+  tab$rank    <- seq_len(n)
   tab
 }
 
@@ -125,20 +175,27 @@ simulate_knockout <- function(bracket, elo, host = NULL,
 #             and is format-specific. A 32-team (8 groups, top 2) version is
 #             provided; the 48-team version is a STUB (see HANDOVER.md).
 simulate_tournament <- function(groups, elo, hosts = character(0),
-                                advance_fn, params = default_params()) {
-  # For each group, find the host team (if any) in that group and give them
-  # the host bump. At most one host per group; any others get no bump.
+                                advance_fn, params = default_params(),
+                                results_df = NULL) {
+  # Adjust Elo based on observed tournament performance before simulating.
+  elo_sim <- if (!is.null(results_df) && nrow(results_df) > 0)
+    adjusted_elo(elo, results_df, params = params)
+  else elo
+
   group_tables <- lapply(names(groups), function(g) {
     gteams <- groups[[g]]
     host_g <- intersect(gteams, hosts)
-    simulate_group(gteams, elo = elo,
-                   host = if (length(host_g)) host_g[1] else NULL,
-                   params = params)
+    known  <- if (!is.null(results_df) && nrow(results_df) > 0)
+      results_df[results_df$team_a %in% gteams & results_df$team_b %in% gteams, ]
+    else NULL
+    simulate_group(gteams, elo = elo_sim,
+                   host          = if (length(host_g)) host_g[1] else NULL,
+                   known_results = known,
+                   params        = params)
   })
   names(group_tables) <- names(groups)
   bracket <- advance_fn(group_tables)
-  # Knockout venues rotate across all three host countries; no per-team bump.
-  ko      <- simulate_knockout(bracket, elo, host = NULL, params = params)
+  ko      <- simulate_knockout(bracket, elo_sim, host = NULL, params = params)
   list(champion = ko$champion, reached = ko$reached,
        group_tables = group_tables, slot_history = ko$slot_history)
 }

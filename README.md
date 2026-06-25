@@ -1,78 +1,98 @@
 # 2026 FIFA World Cup Simulator
 
-A Monte Carlo simulator for the 2026 FIFA World Cup (USA / Canada / Mexico, June 11 – July 19). Given current team strengths and the official group draw, it runs thousands of simulated tournaments and reports the probability of each team winning, reaching the final, the semi-finals, the quarter-finals, the Round of 16, and advancing from the group stage.
+Monte Carlo simulator for the 2026 FIFA World Cup (48 teams, 12 groups,
+June 11 - July 19, USA/Canada/Mexico). Simulates the group stage and knockout
+bracket thousands of times and reports each team's probability of winning,
+reaching the final, semis, quarterfinals, R16, and advancing from the group.
+
+Live at: [shinyapps.io](https://ricosaur.shinyapps.io/worldcup-sim/)
+
+Match results and Elo ratings are updated automatically three times daily via
+GitHub Actions.
 
 ## How it works
 
-Each simulated tournament consists of:
+Team strength is modelled as a global Elo rating (sourced from eloratings.net).
+Each match converts the Elo gap between the two teams into expected goals, then
+draws a scoreline from a Poisson distribution with Dixon-Coles low-score
+correction. See HANDOVER.md for the full design rationale, and `data/ELO_DATA.md`
+for data sourcing and attribution.
 
-1. **Group stage** — 12 groups of 4 teams play a full round-robin. Match scorelines are drawn from a Poisson model parameterised by each team's Elo rating gap.
-2. **Advancement** — the top 2 from each group plus the 8 best third-placed teams (32 teams total) advance to the knockout bracket.
-3. **Knockout rounds** — R32 → R16 → QF → SF → Final. Draws in knockout matches go to extra time and then a coin-flip penalty shootout.
+## App tabs
 
-Team strength is based on **global Elo ratings** from [eloratings.net](https://www.eloratings.net/), updated through live World Cup match results fetched daily from the [football-data.org](https://www.football-data.org/) API.
-
-See [data/ELO_DATA.md](data/ELO_DATA.md) for full documentation of the Elo rating data and its sources.
-
-## Project structure
-
-```
-app.R                  Shiny front end — run locally or deploy to shinyapps.io
-run_simulation.R       Standalone script to run simulations from the terminal
-update_results.R       Fetches finished World Cup matches and updates data/results.csv
-R/
-  model.R              Elo → expected goals, Dixon-Coles scoreline, Elo update
-  tournament.R         Group stage, knockout bracket, advance_48 (2026 format)
-  fetch_data.R         Reads Elo ratings, group draw, and results from CSV / GitHub
-  calibrate.R          Stub — calibration plan documented inside
-data/
-  elo_ratings.csv      Current Elo ratings for all 48 qualified teams
-  groups.csv           Official 2026 group draw (A–L)
-  results.csv          World Cup match results to date (auto-updated)
-  ELO_DATA.md          Documentation for the Elo rating data
-.github/workflows/
-  update_results.yml   GitHub Actions: fetches new results 3× daily during the tournament
-```
+- **Probabilities** -- win / final / semi / QF / R16 / group advance % for all
+  48 teams, with colour bars
+- **Top 16** -- bar chart of the 16 most likely champions
+- **Standings** -- current group standings computed from results to date
+- **Group Breakdown** -- each team's 1st / 2nd / 3rd / 4th finish probability
+  per group, from the simulation
+- **Head-to-Head** -- pick any two teams; get analytical win / draw / loss % and
+  top scoreline probabilities
+- **Bracket** -- split left/right visual bracket showing the most likely team
+  per slot, with analytical 90-min win probabilities vs the likely opponent
 
 ## Running locally
 
 ```r
-# Install dependencies (once)
-install.packages(c("shiny", "bslib", "ggplot2", "DT", "dplyr", "readr", "httr2"))
-
-# Launch the app
 shiny::runApp("app.R")
 ```
 
-Use the slider to choose the number of simulations (500–10 000) and click **Run simulation**. Results appear as a sortable table and a bar chart of the top 16 teams.
+Or headless (prints probabilities to console):
 
-## Data sources
+```r
+source("run_simulation.R")
+```
 
-| Data | Source | Update frequency |
+## File structure
+
+```
+app.R                  Shiny front end
+run_simulation.R       Headless end-to-end script
+update_results.R       Fetches finished WC matches + live Elo; run by Actions
+
+R/model.R              Elo -> expected goals, Dixon-Coles scoring, Elo update
+R/tournament.R         Group stage + knockout bracket (advance_48)
+R/fetch_data.R         Reads Elo ratings, group draw, results (CSV + GitHub)
+R/calibrate.R          Calibrate scoring params against eloratings.net history
+
+data/elo_ratings.csv   Current Elo ratings for all 48 teams (auto-updated)
+data/groups.csv        Official 2026 group draw A-L
+data/results.csv       WC match results to date (auto-updated)
+data/ELO_DATA.md       Data sourcing and attribution
+
+.github/workflows/
+  update_results.yml   Runs update_results.R at 08:00, 16:00, 23:00 UTC
+```
+
+## Calibration
+
+Scoring parameters (elo_per_goal, base_total, rho) can be tuned against
+historical match data:
+
+```r
+source("R/calibrate.R")
+result <- calibrate()
+```
+
+Fetches match histories with Elo at match time from eloratings.net for 20 teams
+across all confederations, minimises log-loss over a parameter grid, then
+refines with Nelder-Mead. Paste the output into `default_params()` in
+`R/model.R`.
+
+## Model parameters
+
+Defined in `default_params()` in `R/model.R`:
+
+| Parameter | Default | Description |
 |---|---|---|
-| Elo ratings | [eloratings.net](https://www.eloratings.net/) via Kaggle (pre-tournament snapshot, then live WC results) | Rolled forward after each match |
-| Group draw | [football-data.org](https://www.football-data.org/) API (`/competitions/WC/matches`) | Fixed after the draw |
-| Match results | [football-data.org](https://www.football-data.org/) API | 3× daily via GitHub Actions |
+| `elo_per_goal` | 245 | Elo points per goal of supremacy |
+| `base_total` | 2.6 | Average total goals in a balanced neutral match |
+| `host_bump` | 80 | Elo-equivalent home advantage for the host nations |
+| `rho` | -0.03 | Dixon-Coles low-score correction |
+| `fast` | TRUE | Direct rpois() draws (~10x faster; validated) |
 
-Match results are fetched automatically by a GitHub Actions workflow (`.github/workflows/update_results.yml`) and committed back to `data/results.csv`. The Shiny app reads these directly from GitHub on each simulation run, so deployed instances stay current without any manual intervention.
+## Data source
 
-To run the update script locally, set your API key and run:
-
-```r
-Sys.setenv(FOOTBALLDATA_KEY = "your_key_here")
-source("update_results.R")
-```
-
-A free API key is available at [football-data.org](https://www.football-data.org/).
-
-## Deploying to shinyapps.io
-
-```r
-install.packages("rsconnect")
-rsconnect::setAccountInfo(name = "your_account", token = "...", secret = "...")
-rsconnect::deployApp()
-```
-
-## License
-
-Code: MIT. Elo rating data: CC BY-SA 4.0 — see [data/ELO_DATA.md](data/ELO_DATA.md) for full attribution.
+Elo ratings and match history: [eloratings.net](https://www.eloratings.net/)
+(World Football Elo Ratings, maintained by Kirill Bukin and Erik Gebhardt).
+See `data/ELO_DATA.md` for full attribution.
