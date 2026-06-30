@@ -5,9 +5,9 @@ on:
     # Runs at 08:00, 16:00, and 23:00 UTC daily during the tournament.
     # Matches are typically played 19:00-02:00 UTC; three daily runs catches
     # everything within a few hours of the final whistle.
-    - cron: "0 8 * * *"
-    - cron: "0 16 * * *"
-    - cron: "0 23 * * *"
+    - cron: "0 20 * * *"
+    - cron: "30 0 * * *"
+    - cron: "0 06 * * *"
   workflow_dispatch:  # allow manual trigger from the GitHub UI
 
 jobs:
