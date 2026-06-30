@@ -24,10 +24,15 @@ CACHE_URL_ELO     <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/ma
 CACHE_URL_GROUPS  <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/groups.csv"
 CACHE_URL_RESULTS <- "https://raw.githubusercontent.com/ricosaur/worldcup-sim/main/data/results.csv"
 
+# raw.githubusercontent.com sits behind a Fastly CDN that caches by exact URL,
+# so a fixed URL can keep serving a stale snapshot after the file changes on
+# GitHub. Appending a timestamp query param forces a fresh fetch every time.
+cache_bust <- function(url) paste0(url, "?t=", as.integer(Sys.time()))
+
 # ----- Elo ratings -----------------------------------------------------------
 # elo_ratings.csv schema: team, elo
 read_elo <- function(path = "data/elo_ratings.csv", url = CACHE_URL_ELO) {
-  df <- tryCatch(readr::read_csv(url, show_col_types = FALSE),
+  df <- tryCatch(readr::read_csv(cache_bust(url), show_col_types = FALSE),
                  error = function(e) NULL)
   if (is.null(df) && file.exists(path)) {
     df <- readr::read_csv(path, show_col_types = FALSE)
@@ -40,7 +45,7 @@ read_elo <- function(path = "data/elo_ratings.csv", url = CACHE_URL_ELO) {
 # groups.csv schema: group, team   (group is a letter A, B, C, ...)
 # Returns a named list: $A = c(team1,...), $B = c(...), ...
 read_groups <- function(path = "data/groups.csv", url = CACHE_URL_GROUPS) {
-  df <- tryCatch(readr::read_csv(url, show_col_types = FALSE),
+  df <- tryCatch(readr::read_csv(cache_bust(url), show_col_types = FALSE),
                  error = function(e) NULL)
   if (is.null(df) && file.exists(path)) {
     df <- readr::read_csv(path, show_col_types = FALSE)
@@ -52,7 +57,7 @@ read_groups <- function(path = "data/groups.csv", url = CACHE_URL_GROUPS) {
 # ----- WC match results -------------------------------------------------------
 # results.csv schema: date, team_a, team_b, score_a, score_b, importance
 read_results <- function(path = "data/results.csv", url = CACHE_URL_RESULTS) {
-  res <- tryCatch(readr::read_csv(url, show_col_types = FALSE), error = \(e) NULL)
+  res <- tryCatch(readr::read_csv(cache_bust(url), show_col_types = FALSE), error = \(e) NULL)
   if (is.null(res) && file.exists(path))
     res <- readr::read_csv(path, show_col_types = FALSE)
   if (is.null(res)) return(NULL)
@@ -65,7 +70,7 @@ read_results <- function(path = "data/results.csv", url = CACHE_URL_RESULTS) {
 # Applies sequential Elo updates so the ratings reflect recent form.
 roll_elo_through_results <- function(elo, results_path = "data/results.csv",
                                      url = CACHE_URL_RESULTS) {
-  res <- tryCatch(readr::read_csv(url, show_col_types = FALSE), error = \(e) NULL)
+  res <- tryCatch(readr::read_csv(cache_bust(url), show_col_types = FALSE), error = \(e) NULL)
   if (is.null(res) && file.exists(results_path)) {
     res <- readr::read_csv(results_path, show_col_types = FALSE)
   }

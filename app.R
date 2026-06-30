@@ -65,10 +65,6 @@ ui <- page_sidebar(
       uiOutput("standings_ui")
     ),
     nav_panel(
-      "Group Breakdown",
-      uiOutput("group_breakdown_ui")
-    ),
-    nav_panel(
       "Head-to-Head",
       card(
         card_header("Select teams"),
@@ -142,7 +138,7 @@ server <- function(input, output, session) {
   # ----- Last updated ----------------------------------------------------------
 
   results_data <- reactive({
-    res <- tryCatch(readr::read_csv(CACHE_URL_RESULTS, show_col_types = FALSE),
+    res <- tryCatch(readr::read_csv(cache_bust(CACHE_URL_RESULTS), show_col_types = FALSE),
                    error = \(e) NULL)
     if (is.null(res) && file.exists("data/results.csv"))
       res <- readr::read_csv("data/results.csv", show_col_types = FALSE)
@@ -303,8 +299,9 @@ server <- function(input, output, session) {
 
   sim_data <- eventReactive(input$run, {
     sim_has_run(TRUE)
-    elo    <- elo_base()
-    groups <- groups_data()
+    elo     <- elo_base()
+    groups  <- groups_data()
+    results <- results_data()
 
     teams      <- unlist(groups, use.names = FALSE)
     champ_n    <- setNames(integer(length(teams)), teams)
@@ -315,22 +312,36 @@ server <- function(input, output, session) {
     r32_n      <- setNames(integer(length(teams)), teams)
     n          <- input$n_sims
 
-    # Group position counters: grp_pos[[group]][[rank]] = count per team
-    grp_pos <- lapply(groups, function(g) {
-      lapply(1:4, function(r) setNames(integer(length(g)), g))
-    })
-
     # Bracket slot counters: slot_mats[[round]][team, slot] = appearances
     n_slots_r  <- c(32L, 16L, 8L, 4L, 2L, 1L)
     slot_mats  <- lapply(n_slots_r, function(ns)
       matrix(0L, nrow = length(teams), ncol = ns, dimnames = list(teams, NULL))
     )
 
+    # The group stage is fully played (no remaining variance) and the real R32
+    # bracket is known, so build it ONCE here rather than re-deriving it every
+    # Monte Carlo iteration. Falls back to the heuristic advance_48() if the
+    # hardcoded bracket ever stops matching this tournament's data.
+    elo_sim <- if (!is.null(results) && nrow(results) > 0)
+      adjusted_elo(elo, results, params = default_params())
+    else elo
+    override <- if (real_bracket_2026_valid(groups)) REAL_BRACKET_2026 else NULL
+    bb <- build_bracket(groups, elo_sim, hosts = c("United States", "Canada", "Mexico"),
+                        advance_fn = advance_48, results_df = results,
+                        bracket_override = override)
+    bracket <- bb$bracket
+
+    # Deterministic most-likely-path projection, used for the bracket plot
+    # instead of Monte Carlo modal slots: guarantees the displayed winner's
+    # probability is never below 50%, and flags matches already played in
+    # reality so they can be shown as confirmed rather than projected.
+    proj <- project_bracket(bracket, elo_sim, known_results = results,
+                            params = default_params())
+
     withProgress(message = "Simulating...", value = 0, {
       for (s in seq_len(n)) {
-        ko <- simulate_tournament(groups, elo, advance_fn = advance_48,
-                                   hosts      = c("United States", "Canada", "Mexico"),
-                                   results_df = results_data())
+        ko <- simulate_knockout(bracket, elo_sim, host = NULL,
+                                params = default_params(), known_results = results)
         champ_n[ko$champion] <- champ_n[ko$champion] + 1
         for (t in names(ko$reached)) {
           rv <- REACHED_RANK[ko$reached[t]]
@@ -339,13 +350,6 @@ server <- function(input, output, session) {
           if (rv >= REACHED_RANK["QF"])  qf_n[t]   <- qf_n[t]  + 1
           if (rv >= REACHED_RANK["SF"])  semi_n[t] <- semi_n[t] + 1
           if (rv >= REACHED_RANK["F"])   final_n[t]<- final_n[t]+ 1
-        }
-        for (g in names(ko$group_tables)) {
-          gt <- ko$group_tables[[g]]
-          for (pos in 1:4) {
-            team <- gt$team[gt$rank == pos]
-            grp_pos[[g]][[pos]][team] <- grp_pos[[g]][[pos]][team] + 1
-          }
         }
         for (r in seq_along(ko$slot_history)) {
           sh_r <- ko$slot_history[[r]]
@@ -370,20 +374,6 @@ server <- function(input, output, session) {
       check.names = FALSE,
       stringsAsFactors = FALSE
     )
-
-    group_df <- do.call(rbind, lapply(names(groups), function(g) {
-      g_teams <- groups[[g]]
-      data.frame(
-        Group  = g,
-        Team   = g_teams,
-        `1st %` = round(100 * vapply(g_teams, \(t) grp_pos[[g]][[1]][t], numeric(1)) / n, 1),
-        `2nd %` = round(100 * vapply(g_teams, \(t) grp_pos[[g]][[2]][t], numeric(1)) / n, 1),
-        `3rd %` = round(100 * vapply(g_teams, \(t) grp_pos[[g]][[3]][t], numeric(1)) / n, 1),
-        `4th %` = round(100 * vapply(g_teams, \(t) grp_pos[[g]][[4]][t], numeric(1)) / n, 1),
-        check.names = FALSE,
-        stringsAsFactors = FALSE
-      )
-    }))
 
     # ----- Split bracket visualisation data ----------------------------------
     # Left half (slots 1..n_per_half each round) progresses left → right.
@@ -434,36 +424,42 @@ server <- function(input, output, session) {
       result
     })
 
-    # Advance probability = P(win 90 min) + P(draw) * 0.5 (draw -> 50/50 pens).
-    # The two sides of any paired matchup sum to exactly 100%.
-    h2h <- function(a, b) {
-      if (a == "?" || b == "?") return(0)
-      mp <- match_probabilities(elo[[a]], elo[[b]])
-      mp$win_a + 0.5 * mp$draw
+    # Box colour: confirmed (already-played) matches get a fixed win/loss
+    # colour; projected (not yet played) matches keep the blue gradient by
+    # win probability. Projected winners are always the higher-probability
+    # side (see project_bracket()), so a projected box is never shown with a
+    # sub-50% probability.
+    proj_color <- function(prob, confirmed, won) {
+      if (confirmed) return(if (won) "#4daf4a" else "#e8a3a3")
+      rgb_vals <- grDevices::colorRamp(c("white", "#2c7bb6"))(prob)
+      grDevices::rgb(rgb_vals[1], rgb_vals[2], rgb_vals[3], maxColorValue = 255)
     }
 
     bdf_rows <- list()
     for (r in 1:5) {
-      nh <- n_per_half[r]
+      nh  <- n_per_half[r]
+      occ <- proj$occupants[[r]]
+      mt  <- proj$matches[[r]]
       for (side in c("L", "R")) {
         sl_off <- if (side == "L") 0L else nh
         x_val  <- if (side == "L") x_L[r] else x_R[r]
         for (sl in seq_len(nh)) {
           col_idx <- sl + sl_off
-          best    <- slot_bests[[r]][col_idx]
-          # Opponent: within-half consecutive pairing (1<->2, 3<->4, ...),
-          # except the Final where left slot 1 faces right slot 1.
-          opp_col <- if (r < 5) {
-            (if (sl %% 2 == 1) sl + 1L else sl - 1L) + sl_off
+          team    <- occ[col_idx]
+          mrow    <- mt[(col_idx + 1) %/% 2, ]
+          won     <- team == mrow$winner
+          prob    <- if (won) mrow$prob else 1 - mrow$prob
+          label   <- if (mrow$confirmed) {
+            paste0(abbrv(team), if (won) " ✓" else " ✗")
           } else {
-            if (side == "L") 2L else 1L
+            paste0(abbrv(team), " ", round(prob * 100), "%")
           }
-          opp  <- slot_bests[[r]][opp_col]
-          prob <- h2h(best, opp)
           bdf_rows[[length(bdf_rows) + 1]] <- data.frame(
             half = side, round = r, slot = sl,
             x = x_val, y = half_y[[r]][sl],
-            team = abbrv(best), prob = prob,
+            team = team, label = label,
+            fill_color = proj_color(prob, mrow$confirmed, won),
+            confirmed = mrow$confirmed, won = won,
             fsize = c(4.2, 5.2, 5.4, 6.4, 7.0)[r],
             stringsAsFactors = FALSE
           )
@@ -471,28 +467,24 @@ server <- function(input, output, session) {
       }
     }
     {
-      # Champion: whichever Final team has higher advance probability vs
-      # the other, keeping the bracket internally consistent with the slot labels.
-      left_fin  <- slot_bests[[5]][1]
-      right_fin <- slot_bests[[5]][2]
-      p_left    <- h2h(left_fin, right_fin)
-      p_right   <- h2h(right_fin, left_fin)
-      best      <- if (left_fin == "?" && right_fin == "?") "?"
-                   else if (left_fin  == "?") right_fin
-                   else if (right_fin == "?") left_fin
-                   else if (p_left >= p_right) left_fin else right_fin
-      prob      <- if (best == left_fin) p_left else p_right
+      champ       <- proj$champion
+      fin_mrow    <- proj$matches[[5]][1, ]
+      champ_label <- if (fin_mrow$confirmed) {
+        paste0(abbrv(champ), " ✓ Champions")
+      } else {
+        paste0(abbrv(champ), " ", round(fin_mrow$prob * 100), "%")
+      }
       bdf_rows[[length(bdf_rows) + 1]] <- data.frame(
         half = "C", round = 6, slot = 1,
         x = x_champ, y = y_champ_pos,
-        team = abbrv(best), prob = prob,
+        team = champ, label = champ_label,
+        fill_color = "#FFD700",
+        confirmed = fin_mrow$confirmed, won = TRUE,
         fsize = 8.5,
         stringsAsFactors = FALSE
       )
     }
-    bracket_df       <- do.call(rbind, bdf_rows)
-    bracket_df$label <- paste0(bracket_df$team, " ",
-                               round(bracket_df$prob * 100), "%")
+    bracket_df <- do.call(rbind, bdf_rows)
 
     seg_rows <- list()
     for (r in 1:4) {
@@ -521,7 +513,6 @@ server <- function(input, output, session) {
     segs_df <- do.call(rbind, seg_rows)
 
     list(summary    = summary[order(-summary$`Win %`), ],
-         group_df   = group_df,
          bracket_df = bracket_df,
          segs_df    = segs_df,
          slot_mats  = slot_mats,
@@ -645,29 +636,6 @@ server <- function(input, output, session) {
     do.call(rbind, Filter(Negate(is.null), rows))
   }, striped = TRUE, hover = TRUE, align = "llr", rownames = FALSE)
 
-  # ----- Group breakdown -------------------------------------------------------
-
-  output$group_breakdown_ui <- renderUI({
-    if (!sim_has_run()) return(sim_notice())
-    groups <- groups_data()
-    cards <- lapply(sort(names(groups)), function(g) {
-      card(card_header(paste("Group", g)),
-           tableOutput(paste0("gbd_", g)))
-    })
-    do.call(layout_columns, c(list(col_widths = rep(4, 12)), cards))
-  })
-
-  for (g in LETTERS[1:12]) {
-    local({
-      grp <- g
-      output[[paste0("gbd_", grp)]] <- renderTable({
-        req(sim_data())
-        gdf <- sim_data()$group_df
-        gdf[gdf$Group == grp, c("Team", "1st %", "2nd %", "3rd %", "4th %")]
-      }, striped = TRUE, hover = TRUE, align = "lrrrr", rownames = FALSE)
-    })
-  }
-
   # ----- Bracket visualisation -------------------------------------------------
 
   output$bracket_ui <- renderUI({
@@ -689,7 +657,7 @@ server <- function(input, output, session) {
                    aes(x = x, y = y, xend = xend, yend = yend),
                    color = "gray55", linewidth = 0.3) +
       geom_label(data = bd[bd$half != "C", ],
-                 aes(x = x, y = y, label = label, fill = prob, size = fsize),
+                 aes(x = x, y = y, label = label, fill = fill_color, size = fsize),
                  label.padding = unit(0.15, "lines"),
                  linewidth = 0.2, hjust = 0.5, color = "black") +
       geom_label(data = bd[bd$half == "C", ],
@@ -697,22 +665,21 @@ server <- function(input, output, session) {
                  fill = "#FFD700", color = "black",
                  label.padding = unit(0.3, "lines"), linewidth = 0.8) +
       scale_size_identity(guide = "none") +
+      scale_fill_identity() +
       annotate("text",
                x = c(x_L, 7.0, x_R),
                y = 17.3,
                label = c(rnd, "CHAMP", rnd),
                fontface = "bold", size = 4.2, hjust = 0.5) +
-      scale_fill_gradient(low = "white", high = "#2c7bb6",
-                          limits = c(0, 1), name = "Advance probability vs likely opponent\n(incl. 50/50 extra time / penalties)",
-                          labels = scales::percent_format(accuracy = 1)) +
       scale_x_continuous(expand = expansion(add = c(0.7, 0.7))) +
       scale_y_continuous(limits = c(0.5, 18.5),
                          expand = expansion(add = c(0, 0))) +
+      labs(caption = "✓ confirmed win     ✗ eliminated     blue shade = projected advance probability vs likely opponent (darker = more likely; incl. 50/50 extra time / penalties)") +
       theme_void() +
-      theme(legend.position  = "bottom",
-            legend.key.width = unit(2, "cm"),
-            plot.background  = element_rect(fill = "white", color = NA),
-            plot.margin      = margin(8, 8, 8, 8))
+      theme(legend.position   = "none",
+            plot.caption      = element_text(size = 10, hjust = 0.5, margin = margin(t = 10)),
+            plot.background   = element_rect(fill = "white", color = NA),
+            plot.margin       = margin(8, 8, 8, 8))
   })
 
   # ----- Head-to-Head ----------------------------------------------------------
