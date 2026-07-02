@@ -115,6 +115,7 @@ server <- function(input, output, session) {
   }
 
   elo_base <- reactive({
+    input$run  # re-fetch fresh Elo from GitHub on every simulation run
     read_elo()
   })
 
@@ -138,6 +139,7 @@ server <- function(input, output, session) {
   # ----- Last updated ----------------------------------------------------------
 
   results_data <- reactive({
+    input$run  # re-fetch fresh results from GitHub on every simulation run
     res <- tryCatch(readr::read_csv(cache_bust(CACHE_URL_RESULTS), show_col_types = FALSE),
                    error = \(e) NULL)
     if (is.null(res) && file.exists("data/results.csv"))
